@@ -107,6 +107,7 @@ public:
     status_t            writeUint64(uint64_t val);
     status_t            writeFloat(float val);
     status_t            writeDouble(double val);
+    status_t            writeIntPtr(intptr_t val);
     status_t            writeCString(const char* str);
     status_t            writeString8(const String8& str);
     status_t            writeString16(const String16& str);
@@ -496,8 +497,10 @@ public:
         inline void* data() { return mData; }
     };
 
+#ifndef DISABLE_ASHMEM_TRACKING
 private:
     size_t mOpenAshmemSize;
+#endif
 
 public:
     // TODO: Remove once ABI can be changed.

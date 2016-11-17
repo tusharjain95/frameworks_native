@@ -57,6 +57,8 @@
 #include "DisplayHardware/HWComposer.h"
 #include "Effects/Daltonizer.h"
 
+#include "FrameRateHelper.h"
+
 namespace android {
 
 // ---------------------------------------------------------------------------
@@ -67,6 +69,7 @@ class EventThread;
 class IGraphicBufferAlloc;
 class Layer;
 class LayerDim;
+class LayerBlur;
 class Surface;
 class RenderEngine;
 class EventControlThread;
@@ -149,6 +152,7 @@ private:
     friend class Layer;
     friend class LayerDim;
     friend class MonitoredProducer;
+    friend class LayerBlur;
 
     // This value is specified in number of frames.  Log frame stats at most
     // every half hour.
@@ -257,6 +261,7 @@ private:
                      bool& /*bIgnoreLayers*/,
                      int& /*indexLOI*/) { }
 
+#ifndef USE_HWC2
     virtual bool updateLayerVisibleNonTransparentRegion(
                      const int& dpy, const sp<Layer>& layer,
                      bool& bIgnoreLayers, int& indexLOI,
@@ -279,12 +284,15 @@ private:
                      const int32_t& /*id*/) { }
 
     virtual void updateVisibleRegionsDirty() { }
+
     virtual void  drawWormHoleIfRequired(HWComposer::LayerListIterator &cur,
         const HWComposer::LayerListIterator &end,
         const sp<const DisplayDevice>& hw,
         const Region& region);
     virtual bool isS3DLayerPresent(const sp<const DisplayDevice>& /*hw*/)
         { return false; };
+#endif
+
     /* ------------------------------------------------------------------------
      * Message handling
      */
@@ -345,6 +353,10 @@ private:
             uint32_t w, uint32_t h, uint32_t flags, sp<IBinder>* outHandle,
             sp<IGraphicBufferProducer>* outGbp, sp<Layer>* outLayer);
 
+    status_t createBlurLayer(const sp<Client>& client, const String8& name,
+            uint32_t w, uint32_t h, uint32_t flags, sp<IBinder>* outHandle,
+            sp<IGraphicBufferProducer>* outGbp, sp<Layer>* outLayer);
+
     // called in response to the window-manager calling
     // ISurfaceComposerClient::destroySurface()
     status_t onLayerRemoved(const sp<Client>& client, const sp<IBinder>& handle);
@@ -355,7 +367,7 @@ private:
     status_t onLayerDestroyed(const wp<Layer>& layer);
 
     // remove a layer from SurfaceFlinger immediately
-    status_t removeLayer(const sp<Layer>& layer);
+    status_t removeLayer(const wp<Layer>& layer);
 
     // add a layer to SurfaceFlinger
     status_t addClientLayer(const sp<Client>& client,
@@ -565,12 +577,26 @@ private:
     mat4 mColorMatrix;
     bool mHasColorMatrix;
 
+    mat4 mSecondaryColorMatrix;
+    bool mHasSecondaryColorMatrix;
+
     // Static screen stats
     bool mHasPoweredOff;
     static const size_t NUM_BUCKETS = 8; // < 1-7, 7+
     nsecs_t mFrameBuckets[NUM_BUCKETS];
     nsecs_t mTotalTime;
     std::atomic<nsecs_t> mLastSwapTime;
+
+    FrameRateHelper mFrameRateHelper;
+
+    /*
+     * A number that increases on every new frame composition and screen capture.
+     * LayerBlur can speed up it's drawing by caching texture using this variable
+     * if multiple LayerBlur objects draw in one frame composition.
+     * In case of display mirroring, this variable should be increased on every display.
+     */
+    uint32_t mActiveFrameSequence;
+
 };
 
 }; // namespace android

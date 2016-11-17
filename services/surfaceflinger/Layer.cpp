@@ -135,6 +135,7 @@ Layer::Layer(SurfaceFlinger* flinger, const sp<Client>& client,
 #else
     mCurrentState.alpha = 0xFF;
 #endif
+    mCurrentState.blur = 0xFF;
     mCurrentState.layerStack = 0;
     mCurrentState.flags = layerFlags;
     mCurrentState.sequence = 0;
@@ -729,18 +730,40 @@ void Layer::setPerFrameData(const sp<const DisplayDevice>& displayDevice) {
         return;
     }
 
-    // Client or SolidColor layers
-    if (mActiveBuffer == nullptr || mActiveBuffer->handle == nullptr ||
-            mHwcLayers[hwcId].forceClientComposition) {
-        // TODO: This also includes solid color layers, but no API exists to
-        // setup a solid color layer yet
+    // Client layers
+    if (mHwcLayers[hwcId].forceClientComposition ||
+            (mActiveBuffer != nullptr && mActiveBuffer->handle == nullptr)) {
         ALOGV("[%s] Requesting Client composition", mName.string());
         setCompositionType(hwcId, HWC2::Composition::Client);
+#ifndef USE_HWC2
         error = hwcLayer->setBuffer(nullptr, Fence::NO_FENCE);
         if (error != HWC2::Error::None) {
             ALOGE("[%s] Failed to set null buffer: %s (%d)", mName.string(),
                     to_string(error).c_str(), static_cast<int32_t>(error));
         }
+#endif
+        return;
+    }
+
+    // SolidColor layers
+    if (mActiveBuffer == nullptr) {
+        setCompositionType(hwcId, HWC2::Composition::SolidColor);
+
+        // For now, we only support black for DimLayer
+        error = hwcLayer->setColor({0, 0, 0, 255});
+        if (error != HWC2::Error::None) {
+            ALOGE("[%s] Failed to set color: %s (%d)", mName.string(),
+                    to_string(error).c_str(), static_cast<int32_t>(error));
+        }
+
+        // Clear out the transform, because it doesn't make sense absent a
+        // source buffer
+        error = hwcLayer->setTransform(HWC2::Transform::None);
+        if (error != HWC2::Error::None) {
+            ALOGE("[%s] Failed to clear transform: %s (%d)", mName.string(),
+                    to_string(error).c_str(), static_cast<int32_t>(error));
+        }
+
         return;
     }
 
@@ -868,21 +891,21 @@ Rect Layer::getPosition(
 // drawing...
 // ---------------------------------------------------------------------------
 
-void Layer::draw(const sp<const DisplayDevice>& hw, const Region& clip) const {
+void Layer::draw(const sp<const DisplayDevice>& hw, const Region& clip) {
     onDraw(hw, clip, false);
 }
 
 void Layer::draw(const sp<const DisplayDevice>& hw,
-        bool useIdentityTransform) const {
+        bool useIdentityTransform) {
     onDraw(hw, Region(hw->bounds()), useIdentityTransform);
 }
 
-void Layer::draw(const sp<const DisplayDevice>& hw) const {
+void Layer::draw(const sp<const DisplayDevice>& hw) {
     onDraw(hw, Region(hw->bounds()), false);
 }
 
 void Layer::onDraw(const sp<const DisplayDevice>& hw, const Region& clip,
-        bool useIdentityTransform) const
+        bool useIdentityTransform)
 {
     ATRACE_CALL();
 
@@ -1093,8 +1116,13 @@ void Layer::setCompositionType(int32_t hwcId, HWC2::Composition type,
 }
 
 HWC2::Composition Layer::getCompositionType(int32_t hwcId) const {
+    if (hwcId == DisplayDevice::DISPLAY_ID_INVALID) {
+        // If we're querying the composition type for a display that does not
+        // have a HWC counterpart, then it will always be Client
+        return HWC2::Composition::Client;
+    }
     if (mHwcLayers.count(hwcId) == 0) {
-        ALOGE("getCompositionType called without a valid HWC layer");
+        ALOGE("getCompositionType called with an invalid HWC layer");
         return HWC2::Composition::Invalid;
     }
     return mHwcLayers.at(hwcId).compositionType;
@@ -1341,9 +1369,14 @@ void Layer::pushPendingState() {
     // If this transaction is waiting on the receipt of a frame, generate a sync
     // point and send it to the remote layer.
     if (mCurrentState.handle != nullptr) {
-        sp<Handle> handle = static_cast<Handle*>(mCurrentState.handle.get());
-        sp<Layer> handleLayer = handle->owner.promote();
-        if (handleLayer == nullptr) {
+        sp<IBinder> strongBinder = mCurrentState.handle.promote();
+        sp<Handle> handle = nullptr;
+        sp<Layer> handleLayer = nullptr;
+        if (strongBinder != nullptr) {
+            handle = static_cast<Handle*>(strongBinder.get());
+            handleLayer = handle->owner.promote();
+        }
+        if (strongBinder == nullptr || handleLayer == nullptr) {
             ALOGE("[%s] Unable to promote Layer handle", mName.string());
             // If we can't promote the layer we are intended to wait on,
             // then it is expired or otherwise invalid. Allow this transaction
@@ -1593,6 +1626,14 @@ bool Layer::setLayer(uint32_t z) {
     mCurrentState.sequence++;
     mCurrentState.z = z;
     mCurrentState.modified = true;
+    setTransactionFlags(eTransactionNeeded);
+    return true;
+}
+bool Layer::setBlur(uint8_t blur) {
+    if (mCurrentState.blur == blur)
+        return false;
+    mCurrentState.sequence++;
+    mCurrentState.blur = blur;
     setTransactionFlags(eTransactionNeeded);
     return true;
 }
@@ -2197,9 +2238,9 @@ void Layer::dump(String8& result, Colorizer& colorizer) const
             "crop=(%4d,%4d,%4d,%4d), finalCrop=(%4d,%4d,%4d,%4d), "
             "isOpaque=%1d, invalidate=%1d, "
 #ifdef USE_HWC2
-            "alpha=%.3f, flags=0x%08x, tr=[%.2f, %.2f][%.2f, %.2f]\n"
+            "alpha=%.3f, blur=0x%02x, flags=0x%08x, tr=[%.2f, %.2f][%.2f, %.2f]\n"
 #else
-            "alpha=0x%02x, flags=0x%08x, tr=[%.2f, %.2f][%.2f, %.2f]\n"
+            "alpha=0x%02x, blur=0x%02x, flags=0x%08x, tr=[%.2f, %.2f][%.2f, %.2f]\n"
 #endif
             "      client=%p\n",
             s.layerStack, s.z, s.active.transform.tx(), s.active.transform.ty(), s.active.w, s.active.h,
@@ -2208,7 +2249,7 @@ void Layer::dump(String8& result, Colorizer& colorizer) const
             s.finalCrop.left, s.finalCrop.top,
             s.finalCrop.right, s.finalCrop.bottom,
             isOpaque(s), contentDirty,
-            s.alpha, s.flags,
+            s.alpha, s.blur, s.flags,
             s.active.transform[0][0], s.active.transform[0][1],
             s.active.transform[1][0], s.active.transform[1][1],
             client.get());
@@ -2229,7 +2270,7 @@ void Layer::dump(String8& result, Colorizer& colorizer) const
             mQueuedFrames, mRefreshPending);
 
     if (mSurfaceFlingerConsumer != 0) {
-        mSurfaceFlingerConsumer->dump(result, "            ");
+        mSurfaceFlingerConsumer->dumpState(result, "            ");
     }
 }
 

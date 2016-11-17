@@ -19,28 +19,28 @@
 //#define LOG_NDEBUG 0
 
 // Log debug messages for each raw event received from the EventHub.
-#define DEBUG_RAW_EVENTS 0
+// #define DEBUG_RAW_EVENTS 0
 
 // Log debug messages about touch screen filtering hacks.
-#define DEBUG_HACKS 0
+// #define DEBUG_HACKS 0
 
 // Log debug messages about virtual key processing.
-#define DEBUG_VIRTUAL_KEYS 0
+// #define DEBUG_VIRTUAL_KEYS 0
 
 // Log debug messages about pointers.
-#define DEBUG_POINTERS 0
+// #define DEBUG_POINTERS 0
 
 // Log debug messages about pointer assignment calculations.
-#define DEBUG_POINTER_ASSIGNMENT 0
+// #define DEBUG_POINTER_ASSIGNMENT 0
 
 // Log debug messages about gesture detection.
-#define DEBUG_GESTURES 0
+// #define DEBUG_GESTURES 0
 
 // Log debug messages about the vibrator.
-#define DEBUG_VIBRATOR 0
+// #define DEBUG_VIBRATOR 0
 
 // Log debug messages about fusing stylus data.
-#define DEBUG_STYLUS_FUSION 0
+// #define DEBUG_STYLUS_FUSION 0
 
 #include "InputReader.h"
 
@@ -116,9 +116,9 @@ static inline const char* toString(bool value) {
 }
 
 static int32_t rotateValueUsingRotationMap(int32_t value, int32_t orientation,
-        const int32_t map[][4], size_t mapSize) {
+        const int32_t map[][4], size_t mapSize, int32_t rotationMapOffset) {
     if (orientation != DISPLAY_ORIENTATION_0) {
-        for (size_t i = 0; i < mapSize; i++) {
+        for (size_t i = rotationMapOffset; i < mapSize; i++) {
             if (value == map[i][0]) {
                 return map[i][orientation];
             }
@@ -130,6 +130,16 @@ static int32_t rotateValueUsingRotationMap(int32_t value, int32_t orientation,
 static const int32_t keyCodeRotationMap[][4] = {
         // key codes enumerated counter-clockwise with the original (unrotated) key first
         // no rotation,        90 degree rotation,  180 degree rotation, 270 degree rotation
+
+        // volume keys - tablet
+        { AKEYCODE_VOLUME_UP,   AKEYCODE_VOLUME_UP,   AKEYCODE_VOLUME_DOWN, AKEYCODE_VOLUME_DOWN },
+        { AKEYCODE_VOLUME_DOWN, AKEYCODE_VOLUME_DOWN, AKEYCODE_VOLUME_UP,   AKEYCODE_VOLUME_UP },
+
+        // volume keys - phone or hybrid
+        { AKEYCODE_VOLUME_UP,   AKEYCODE_VOLUME_DOWN, AKEYCODE_VOLUME_DOWN, AKEYCODE_VOLUME_UP },
+        { AKEYCODE_VOLUME_DOWN, AKEYCODE_VOLUME_UP,   AKEYCODE_VOLUME_UP,   AKEYCODE_VOLUME_DOWN },
+
+        // dpad keys - common
         { AKEYCODE_DPAD_DOWN,   AKEYCODE_DPAD_RIGHT,  AKEYCODE_DPAD_UP,     AKEYCODE_DPAD_LEFT },
         { AKEYCODE_DPAD_RIGHT,  AKEYCODE_DPAD_UP,     AKEYCODE_DPAD_LEFT,   AKEYCODE_DPAD_DOWN },
         { AKEYCODE_DPAD_UP,     AKEYCODE_DPAD_LEFT,   AKEYCODE_DPAD_DOWN,   AKEYCODE_DPAD_RIGHT },
@@ -138,9 +148,9 @@ static const int32_t keyCodeRotationMap[][4] = {
 static const size_t keyCodeRotationMapSize =
         sizeof(keyCodeRotationMap) / sizeof(keyCodeRotationMap[0]);
 
-static int32_t rotateKeyCode(int32_t keyCode, int32_t orientation) {
+static int32_t rotateKeyCode(int32_t keyCode, int32_t orientation, int32_t rotationMapOffset) {
     return rotateValueUsingRotationMap(keyCode, orientation,
-            keyCodeRotationMap, keyCodeRotationMapSize);
+            keyCodeRotationMap, keyCodeRotationMapSize, rotationMapOffset);
 }
 
 static void rotateDelta(int32_t orientation, float* deltaX, float* deltaY) {
@@ -2164,11 +2174,17 @@ void KeyboardInputMapper::configure(nsecs_t when,
 
     if (!changes || (changes & InputReaderConfiguration::CHANGE_SWAP_KEYS)) {
         mSwapKeys = config->swapKeys;
+
+    if (!changes || (changes & InputReaderConfiguration::CHANGE_VOLUME_KEYS_ROTATION)) {
+        // mode 0 (disabled) ~ offset 4
+        // mode 1 (phone) ~ offset 2
+        // mode 2 (tablet) ~ offset 0
+        mRotationMapOffset = 4 - 2 * config->volumeKeysRotationMode;
     }
 }
 
 void KeyboardInputMapper::configureParameters() {
-    mParameters.orientationAware = false;
+    mParameters.orientationAware = !getDevice()->isExternal();
     getDevice()->getConfiguration().tryGetProperty(String8("keyboard.orientationAware"),
             mParameters.orientationAware);
 
@@ -2252,7 +2268,7 @@ void KeyboardInputMapper::processKey(nsecs_t when, bool down, int32_t scanCode,
     if (down) {
         // Rotate key codes according to orientation if needed.
         if (mParameters.orientationAware && mParameters.hasAssociatedDisplay) {
-            keyCode = rotateKeyCode(keyCode, mOrientation);
+            keyCode = rotateKeyCode(keyCode, mOrientation, mRotationMapOffset);
         }
 
         // Add key down.
@@ -3092,7 +3108,8 @@ void TouchInputMapper::configure(nsecs_t when,
     if (!changes || (changes & (InputReaderConfiguration::CHANGE_DISPLAY_INFO
             | InputReaderConfiguration::CHANGE_POINTER_GESTURE_ENABLEMENT
             | InputReaderConfiguration::CHANGE_SHOW_TOUCHES
-            | InputReaderConfiguration::CHANGE_EXTERNAL_STYLUS_PRESENCE))) {
+            | InputReaderConfiguration::CHANGE_EXTERNAL_STYLUS_PRESENCE
+            | InputReaderConfiguration::CHANGE_STYLUS_ICON_ENABLED))) {
         // Configure device sources, surface dimensions, orientation and
         // scaling factors.
         configureSurface(when, &resetNeeded);
@@ -5026,7 +5043,7 @@ void TouchInputMapper::dispatchPointerGestures(nsecs_t when, uint32_t policyFlag
         if (mParameters.gestureMode == Parameters::GESTURE_MODE_MULTI_TOUCH
                 && mPointerGesture.lastGestureMode == PointerGesture::FREEFORM) {
             // Remind the user of where the pointer is after finishing a gesture with spots.
-            mPointerController->unfade(PointerControllerInterface::TRANSITION_GRADUAL);
+            unfadePointer(PointerControllerInterface::TRANSITION_GRADUAL);
         }
         break;
     case PointerGesture::TAP:
@@ -6029,6 +6046,7 @@ void TouchInputMapper::dispatchPointerStylus(nsecs_t when, uint32_t policyFlags)
         mPointerSimple.currentProperties.id = 0;
         mPointerSimple.currentProperties.toolType =
                 mCurrentCookedState.cookedPointerData.pointerProperties[index].toolType;
+        mLastStylusTime = when;
     } else {
         down = false;
         hovering = false;
@@ -6108,10 +6126,15 @@ void TouchInputMapper::dispatchPointerSimple(nsecs_t when, uint32_t policyFlags,
             mPointerController->setPresentation(PointerControllerInterface::PRESENTATION_POINTER);
             mPointerController->clearSpots();
             mPointerController->setButtonState(mCurrentRawState.buttonState);
-            mPointerController->unfade(PointerControllerInterface::TRANSITION_IMMEDIATE);
+            unfadePointer(PointerControllerInterface::TRANSITION_IMMEDIATE);
         } else if (!down && !hovering && (mPointerSimple.down || mPointerSimple.hovering)) {
             mPointerController->fade(PointerControllerInterface::TRANSITION_GRADUAL);
         }
+    }
+    
+    if (rejectPalm(when)) {     // stylus is currently active
+        mPointerSimple.reset();
+        return;
     }
 
     if (mPointerSimple.down && !down) {
@@ -6234,6 +6257,9 @@ void TouchInputMapper::dispatchMotion(nsecs_t when, uint32_t policyFlags, uint32
         const PointerProperties* properties, const PointerCoords* coords,
         const uint32_t* idToIndex, BitSet32 idBits, int32_t changedId,
         float xPrecision, float yPrecision, nsecs_t downTime) {
+    
+    if (rejectPalm(when)) return;
+    
     PointerCoords pointerCoords[MAX_POINTERS];
     PointerProperties pointerProperties[MAX_POINTERS];
     uint32_t pointerCount = 0;
@@ -6305,6 +6331,21 @@ void TouchInputMapper::fadePointer() {
     if (mPointerController != NULL) {
         mPointerController->fade(PointerControllerInterface::TRANSITION_GRADUAL);
     }
+}
+
+void TouchInputMapper::unfadePointer(PointerControllerInterface::Transition transition) {
+    if (mPointerController != NULL &&
+            !(mPointerUsage == POINTER_USAGE_STYLUS && !mConfig.stylusIconEnabled)) {
+        mPointerController->unfade(transition);
+    }
+}
+
+nsecs_t TouchInputMapper::mLastStylusTime = 0;
+
+bool TouchInputMapper::rejectPalm(nsecs_t when) {
+    return (when - mLastStylusTime < mConfig.stylusPalmRejectionTime) &&
+        mPointerSimple.currentProperties.toolType != AMOTION_EVENT_TOOL_TYPE_STYLUS &&
+        mPointerSimple.currentProperties.toolType != AMOTION_EVENT_TOOL_TYPE_ERASER;
 }
 
 void TouchInputMapper::cancelTouch(nsecs_t when) {
@@ -6673,6 +6714,7 @@ void MultiTouchInputMapper::syncTouch(nsecs_t when, RawState* outState) {
     size_t inCount = mMultiTouchMotionAccumulator.getSlotCount();
     size_t outCount = 0;
     BitSet32 newPointerIdBits;
+    mHavePointerIds = true;
 
     for (size_t inIndex = 0; inIndex < inCount; inIndex++) {
         const MultiTouchMotionAccumulator::Slot* inSlot =
@@ -6717,33 +6759,33 @@ void MultiTouchInputMapper::syncTouch(nsecs_t when, RawState* outState) {
         outPointer.isHovering = isHovering;
 
         // Assign pointer id using tracking id if available.
-        mHavePointerIds = true;
-        int32_t trackingId = inSlot->getTrackingId();
-        int32_t id = -1;
-        if (trackingId >= 0) {
-            for (BitSet32 idBits(mPointerIdBits); !idBits.isEmpty(); ) {
-                uint32_t n = idBits.clearFirstMarkedBit();
-                if (mPointerTrackingIdMap[n] == trackingId) {
-                    id = n;
+        if (mHavePointerIds) {
+            int32_t trackingId = inSlot->getTrackingId();
+            int32_t id = -1;
+            if (trackingId >= 0) {
+                for (BitSet32 idBits(mPointerIdBits); !idBits.isEmpty(); ) {
+                    uint32_t n = idBits.clearFirstMarkedBit();
+                    if (mPointerTrackingIdMap[n] == trackingId) {
+                        id = n;
+                    }
+                }
+
+                if (id < 0 && !mPointerIdBits.isFull()) {
+                    id = mPointerIdBits.markFirstUnmarkedBit();
+                    mPointerTrackingIdMap[id] = trackingId;
                 }
             }
-
-            if (id < 0 && !mPointerIdBits.isFull()) {
-                id = mPointerIdBits.markFirstUnmarkedBit();
-                mPointerTrackingIdMap[id] = trackingId;
+            if (id < 0) {
+                mHavePointerIds = false;
+                outState->rawPointerData.clearIdBits();
+                newPointerIdBits.clear();
+            } else {
+                outPointer.id = id;
+                outState->rawPointerData.idToIndex[id] = outCount;
+                outState->rawPointerData.markIdBit(id, isHovering);
+                newPointerIdBits.markBit(id);
             }
         }
-        if (id < 0) {
-            mHavePointerIds = false;
-            outState->rawPointerData.clearIdBits();
-            newPointerIdBits.clear();
-        } else {
-            outPointer.id = id;
-            outState->rawPointerData.idToIndex[id] = outCount;
-            outState->rawPointerData.markIdBit(id, isHovering);
-            newPointerIdBits.markBit(id);
-        }
-
         outCount += 1;
     }
 
