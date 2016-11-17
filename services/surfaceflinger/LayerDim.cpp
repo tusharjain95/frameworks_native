@@ -48,7 +48,7 @@ LayerDim::~LayerDim() {
 }
 
 void LayerDim::onDraw(const sp<const DisplayDevice>& hw,
-        const Region& /* clip */, bool useIdentityTransform) const
+        const Region& /* clip */, bool useIdentityTransform)
 {
     const State& s(getDrawingState());
     if (s.alpha>0) {
@@ -70,6 +70,7 @@ bool LayerDim::isVisible() const {
     return !(s.flags & layer_state_t::eLayerHidden) && s.alpha;
 }
 
+#ifndef USE_HWC2
 void LayerDim::setPerFrameData(const sp<const DisplayDevice>& hw,
         HWComposer::HWCLayerInterface& layer) {
   HWComposer& hwc = mFlinger->getHwComposer();
@@ -82,6 +83,7 @@ void LayerDim::setPerFrameData(const sp<const DisplayDevice>& hw,
     layer.setDim(rgba_color);
   }
 }
+#endif
 
 // ---------------------------------------------------------------------------
 
